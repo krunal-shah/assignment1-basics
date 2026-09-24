@@ -1,17 +1,18 @@
 import os
 from typing import BinaryIO
+from cs336_basics.tokenizer_utils import find_min_match
 
 
 def find_chunk_boundaries(
     file: BinaryIO,
     desired_num_chunks: int,
-    split_special_token: bytes,
+    special_tokens: bytes,
 ) -> list[int]:
     """
     Chunk the file into parts that can be counted independently.
     May return fewer chunks if the boundaries end up overlapping.
     """
-    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+    # assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
 
     # Get total file size in bytes
     file.seek(0, os.SEEK_END)
@@ -39,7 +40,8 @@ def find_chunk_boundaries(
                 break
 
             # Find the special token in the mini chunk
-            found_at = mini_chunk.find(split_special_token)
+            # found_at = mini_chunk.find(split_special_token)
+            found_at, special_token_len, _ = find_min_match(mini_chunk, special_tokens)
             if found_at != -1:
                 chunk_boundaries[bi] = initial_position + found_at
                 break

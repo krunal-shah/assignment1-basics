@@ -1,10 +1,11 @@
-from cs336_basics.pretokenization_example import find_chunk_boundaries
+# from cs336_basics.pretokenization_example import find_chunk_boundaries
 from multiprocessing import Pool
 import functools
 import regex as re
 import time
 from contextlib import contextmanager
-
+from typing import BinaryIO
+import os
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 num_processes = 10
@@ -35,48 +36,109 @@ def dict_subtract(dictionary, key, value):
         dictionary[key] -= value
 
 
+def find_min_match(chunk, special_tokens, start=None):
+    next_match = (-1, 0, None)
+    for special_token in special_tokens:
+        result = chunk.find(special_token) if not start else chunk.find(special_token, start)
+        if result != -1:
+            if next_match[0] == -1:
+                next_match = (result, len(special_token), special_token)
+            elif result < next_match[0]:
+                next_match = (result, len(special_token), special_token)
+            elif result == next_match[0] and len(special_token) > next_match[1]:
+                next_match = (result, len(special_token), special_token)
+    return next_match
+
+
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    special_tokens: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    # assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            # found_at = mini_chunk.find(split_special_token)
+            found_at, special_token_len, _ = find_min_match(mini_chunk, special_tokens)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
+
 # The following is a serial implementation, but you can parallelize this
 # by sending each start/end pair to a set of processes.
-def pretokenize_chunk(index_tuple, input_file, special_tokens_bytes):
+def pretokenize_chunk(chunk: str | bytes, special_tokens: list[str | bytes], return_dict=True):
+    token_dict = {}
+    pretokenized_chunks = []
+    start = 0
+    end, token_length, end_special_token = find_min_match(chunk, special_tokens, start)
+
+    def process_subchunk(subchunk):
+        if isinstance(subchunk, bytes):
+            subchunk = subchunk.decode("utf-8", errors="ignore")
+        for token in re.finditer(PAT, subchunk):
+            token = token.group(0)
+            if return_dict:
+                dict_add(token_dict, token, 1)
+            else:
+                pretokenized_chunks.append(token)
+
+    while end != -1 and end_special_token is not None:
+        subchunk = chunk[start:end]
+        process_subchunk(subchunk)
+        if not return_dict:
+            pretokenized_chunks.append(end_special_token)
+        start = end + token_length
+        end, token_length, end_special_token = find_min_match(chunk, special_tokens, start)
+
+    process_subchunk(chunk[start:])
+
+    return token_dict if return_dict else pretokenized_chunks
+
+
+# The following is a serial implementation, but you can parallelize this
+# by sending each start/end pair to a set of processes.
+def pretokenize_file_chunk(index_tuple, input_file, special_tokens_bytes):
     # do the pretokenization
     start, end = index_tuple
     with open(input_file, "rb") as fr:
         fr.seek(start)
         chunk = fr.read(end - start)
 
-    def find_end(start):
-        next_end = len(chunk) + 1
-        token_bytes = 0
-        for special_token_bytes in special_tokens_bytes:
-            token_end = chunk.find(special_token_bytes, start)
-            if token_end < next_end and token_end != -1:
-                next_end = token_end
-                token_bytes = len(special_token_bytes)
-            elif token_end == next_end and token_end != -1 and len(special_token_bytes) > token_bytes:
-                next_end = token_end
-                token_bytes = len(special_token_bytes)
-        if next_end == len(chunk) + 1:
-            return -1, 0
-        return next_end, token_bytes
-
-    token_dict = {}
-    start = 0
-    end, token_bytes = find_end(start)
-
-    def process_subchunk(subchunk):
-        for token in re.finditer(PAT, subchunk):
-            token = token.group(0)
-            dict_add(token_dict, token, 1)
-
-    while end != -1:
-        subchunk = chunk[start:end].decode("utf-8", errors="ignore")
-        process_subchunk(subchunk)
-        start = end + token_bytes
-        end, token_bytes = find_end(start)
-
-    process_subchunk(chunk[start:].decode("utf-8", errors="ignore"))
-
-    return token_dict
+    return pretokenize_chunk(chunk, special_tokens_bytes, return_dict=True)
 
 
 def get_pair_counts(data):
@@ -237,11 +299,11 @@ def train_bpe(input_path, vocab_size, special_tokens):
 
     with timer("Initial processing of file reading and creating pretokenized data"):
         with open(input_path, "rb") as f:
-            boundaries = find_chunk_boundaries(f, num_processes, special_tokens[0].encode("utf-8"))
+            boundaries = find_chunk_boundaries(f, num_processes, special_tokens_bytes)
             with Pool(processes=num_processes) as p:
                 pretokenized_dicts = p.imap(
                     functools.partial(
-                        pretokenize_chunk,
+                        pretokenize_file_chunk,
                         input_file=f.name,
                         special_tokens_bytes=special_tokens_bytes,
                     ),
