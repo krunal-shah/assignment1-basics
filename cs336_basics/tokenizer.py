@@ -132,6 +132,10 @@ class Tokenizer:
         combined_string = b""
         for string in iterable:
             special_token_present = False
+            borrowed_string_len = min(len(combined_string), 40)
+            borrowed_string = combined_string[-1 * borrowed_string_len :]
+            string = borrowed_string + string
+            combined_string = combined_string[: -1 * borrowed_string_len]
             for special_token_bytes in self.special_tokens_bytes:
                 if string.find(special_token_bytes) != -1:
                     special_token_present = True
@@ -148,18 +152,19 @@ class Tokenizer:
         if combined_string:
             yield from self.encode(combined_string)
 
-    def encode_file_chunk(self, index_tuple, filepath):
+    def iterate_file_chunked(self, index_tuple, filepath):
         start, end = index_tuple
-        encoded_ids_list = []
         with open(filepath, "rb") as fr:
             fr.seek(start)
             bytes_to_read = end - start
             while bytes_to_read:
                 chunk = fr.read(min(4096, bytes_to_read))
                 bytes_to_read -= len(chunk)
-                encoded_ids_list.append(self.encode(chunk))
+                yield chunk
 
-        return [token for encoded_ids in encoded_ids_list for token in encoded_ids]
+    def encode_file_chunk(self, index_tuple, filepath):
+        encoded_ids = [token for token in self.encode_iterable_bytes(self.iterate_file_chunked(index_tuple, filepath))]
+        return encoded_ids
 
     def encode_file(self, filepath, outfilepath):
         with timer("Encode file"):

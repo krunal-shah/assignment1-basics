@@ -108,7 +108,7 @@ def pretokenize_chunk(chunk: str | bytes, special_tokens: list[str | bytes], ret
 
     def process_subchunk(subchunk):
         if isinstance(subchunk, bytes):
-            subchunk = subchunk.decode("utf-8", errors="ignore")
+            subchunk = subchunk.decode("utf-8", errors="replace")
         for token in re.finditer(PAT, subchunk):
             token = token.group(0)
             if return_dict:
