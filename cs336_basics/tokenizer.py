@@ -1,3 +1,4 @@
+import codecs
 import functools
 import pickle
 from cs336_basics.tokenizer_utils import pretokenize_chunk, train_bpe, find_chunk_boundaries, timer
@@ -179,17 +180,25 @@ class Tokenizer:
                             for chunk in batched(token_iterator, 4096):
                                 np.asarray(chunk, dtype=np.uint16).tofile(outfile)
 
+    def bytes_to_utf_iterable(self, chunk_iterable):
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        for chunk in chunk_iterable:
+            yield decoder.decode(chunk)
+        yield decoder.decode(b"", final=True)
+
+    def iterate_np_array_file_chunked(self, filepath):
+        with open(filepath, "rb") as f:
+            while True:
+                chunk = np.fromfile(f, dtype=np.uint16, count=4096)
+                if chunk.size == 0:
+                    break
+                yield self.decode(chunk.tolist(), to_utf=False)
+
     def decode_file(self, filepath, outfilepath):
         with timer("Decode file"):
-            with open(filepath, "rb") as f:
-                with open(outfilepath, "w") as outfile:
-                    while True:
-                        chunk = np.fromfile(f, dtype=np.uint16, count=4096)
-
-                        if chunk.size == 0:
-                            break
-
-                        outfile.write(self.decode(chunk.tolist(), to_utf=True))
+            with open(outfilepath, "w", encoding="utf-8") as outfile:
+                for utf in self.bytes_to_utf_iterable(self.iterate_np_array_file_chunked(filepath)):
+                    outfile.write(utf)
 
     def decode(self, ids, to_utf=True):
         decoded_bytes = [self.vocab[tid] for tid in ids]
