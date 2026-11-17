@@ -1,3 +1,4 @@
+import logging
 import codecs
 import functools
 import pickle
@@ -9,8 +10,11 @@ from multiprocessing import Pool
 import numpy as np
 from itertools import batched
 import argparse
+import torch
 
 NUM_PROCESSES = 10
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args():
@@ -64,7 +68,7 @@ class Tokenizer:
     def load(tokenizer_file, special_tokens=[]):
         with open(Path(tokenizer_file), "rb") as f:
             tokenizer_data = pickle.load(f)
-        tokenizer_data["special_tokens"] = list(set(special_tokens + tokenizer_data["special_tokens"]))
+        tokenizer_data["special_tokens"] = list(set(special_tokens + list(tokenizer_data["special_tokens"])))
         return Tokenizer(**tokenizer_data)
 
     def encode_chunk(self, chunk: str | bytes):
@@ -178,7 +182,7 @@ class Tokenizer:
                     with open(outfilepath, "wb") as outfile:
                         for token_iterator in token_iterators_list:
                             for chunk in batched(token_iterator, 4096):
-                                np.asarray(chunk, dtype=np.uint16).tofile(outfile)
+                                np.asarray(chunk, dtype=np.int32).tofile(outfile)
 
     def bytes_to_utf_iterable(self, chunk_iterable):
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -189,7 +193,7 @@ class Tokenizer:
     def iterate_np_array_file_chunked(self, filepath):
         with open(filepath, "rb") as f:
             while True:
-                chunk = np.fromfile(f, dtype=np.uint16, count=4096)
+                chunk = np.fromfile(f, dtype=np.int32, count=4096)
                 if chunk.size == 0:
                     break
                 yield self.decode(chunk.tolist(), to_utf=False)
@@ -205,6 +209,37 @@ class Tokenizer:
         decoded_bytes = b"".join(decoded_bytes)
 
         return decoded_bytes.decode("utf-8", errors="replace") if to_utf else decoded_bytes
+
+
+def get_training_batch(dataset, batch_size, context_length, device):
+    n = len(dataset)
+    max_valid_index = n - context_length - 1
+    sampled_indices = np.random.randint(0, high=max_valid_index + 1, size=batch_size)
+    batch_indices = np.expand_dims(np.arange(context_length + 1), axis=0)
+    batch_indices = np.expand_dims(sampled_indices, axis=-1) + batch_indices
+    batch_indices_flattened = batch_indices.reshape(-1)
+    batch = np.take(dataset, axis=0, indices=batch_indices_flattened).reshape(batch_size, context_length + 1)
+
+    batch = torch.tensor(batch, device=device)
+    return (batch[:, :-1], batch[:, 1:])
+
+
+def get_validation_batch_itr(dataset, batch_size, context_length, device):
+    n = len(dataset)
+    max_valid_index = n - context_length - 1
+
+    for i in range(0, max_valid_index + 1, context_length * batch_size):
+        sampled_indices = np.arange(i, min(max_valid_index + 1, i + batch_size * context_length), step=context_length)
+        current_batch_size = len(sampled_indices)
+        batch_indices = np.expand_dims(np.arange(context_length + 1), axis=0)
+        batch_indices = np.expand_dims(sampled_indices, axis=-1) + batch_indices
+        batch_indices_flattened = batch_indices.reshape(-1)
+        batch = np.take(dataset, axis=0, indices=batch_indices_flattened).reshape(
+            current_batch_size, context_length + 1
+        )
+
+        batch = torch.tensor(batch, device=device)
+        yield (batch[:, :-1], batch[:, 1:])
 
 
 if __name__ == "__main__":
